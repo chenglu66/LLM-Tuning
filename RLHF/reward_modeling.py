@@ -137,7 +137,7 @@ script_args = parser.parse_args_into_dataclasses()[0]
 # load the reward dataset
 # - `beyond/rlhf-reward-single-round`` for English
 # - `beyond/rlhf-reward-single-round-trans_chinese`` for Chinese
-reward_dataset = load_from_disk('../data/rlhf-reward-single-round-trans_chinese')
+reward_dataset = load_from_disk('/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese')
 train_dataset = reward_dataset['train']
 eval_dataset = reward_dataset['test']
 if script_args.train_subset > 0:
