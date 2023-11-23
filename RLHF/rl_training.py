@@ -3,9 +3,11 @@ Mainly copied from https://github.com/lvwerra/trl/blob/main/examples/stack_llama
 Some changes:
 
 """
+import os
 from dataclasses import dataclass, field
 from typing import Optional
-
+from modeling_baichuan_for_cls import BaichuanForSequenceClassification
+from peft import PeftModel
 import torch
 from accelerate import Accelerator
 from datasets import load_dataset,load_from_disk
@@ -13,8 +15,9 @@ from peft import LoraConfig,PeftModel, PeftConfig
 from tqdm import tqdm
 from transformers import Adafactor, AutoTokenizer, HfArgumentParser, pipeline, AutoModelForCausalLM
 
-from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, set_seed, PreTrainedModelWrapper
+from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer, set_seed, PreTrainedModelWrapper,create_reference_model
 from trl.core import LengthSampler
+
 
 
 tqdm.pandas()
@@ -46,7 +49,7 @@ class ScriptArguments:
     )
     adafactor: Optional[bool] = field(default=False, metadata={"help": "whether to use the adafactor optimizer"})
     early_stopping: Optional[bool] = field(default=False, metadata={"help": "whether to early stop"})
-    target_kl: Optional[float] = field(default=0.1, metadata={"help": "kl target for early stopping"})
+    target_kl: Optional[float] = field(default=6.0, metadata={"help": "kl target for early stopping"})
     reward_baseline: Optional[float] = field(
         default=0.0,
         metadata={"help": "a baseline value that is subtracted from the reward"},
@@ -57,11 +60,11 @@ class ScriptArguments:
     seed: Optional[int] = field(default=0, metadata={"help": "the seed"})
     steps: Optional[int] = field(default=20000, metadata={"help": "number of epochs"})
     init_kl_coef: Optional[float] = field(
-        default=0.5,
+        default=0.2,
         metadata={"help": "Initial KL penalty coefficient (used for adaptive and linear control)"},
     )
 
-    adap_kl_ctrl: Optional[bool] = field(default=False, metadata={"help": "Use adaptive KL control, otherwise linear"})
+    adap_kl_ctrl: Optional[bool] = field(default=True, metadata={"help": "Use adaptive KL control, otherwise linear"})
 
 
 parser = HfArgumentParser(ScriptArguments)
@@ -83,8 +86,8 @@ if getattr(tokenizer, "pad_token", None) is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 # training dataset
-dataset = load_from_disk('../data/rlhf-reward-single-round-trans_chinese')
-dataset = dataset['train']
+dataset = train_dataset= load_dataset("parquet", data_files="/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese/data/train-00000-of-00001-789dc5dece0f1fc1.parquet",split="train", cache_dir=None)
+#dataset = dataset['train']
 original_columns = dataset.column_names
 num_proc = 24
 
@@ -101,7 +104,7 @@ def preprocess_function(examples):
     
     # rlhf-reward-single-round-trans_chinese:
     for question in examples["prompt"]:
-        query = "问：" + question + "\n\n答："
+        query = "<reserved_102>" + question + "<reserved_103>"
         tokenized_question = tokenizer(query, truncation=True)
         new_examples["query"].append(query)
         new_examples["input_ids"].append(tokenized_question["input_ids"])
@@ -147,8 +150,7 @@ set_seed(config.seed)
 current_device = Accelerator().local_process_index
 print('Loading base model for ppo training...')
 
-"""
-下面是原版 StackLLaMA 的实现，是在merge了STF LoRA的模型的基础上，再新增一个LoRA，挺费劲的。
+#下面是原版 StackLLaMA 的实现，是在merge了STF LoRA的模型的基础上，再新增一个LoRA，挺费劲的。
 lora_config = LoraConfig(
     r=8,
     lora_alpha=32,
@@ -166,7 +168,7 @@ ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(
     peft_config=lora_config,
     trust_remote_code=True
 )
-"""
+
 # 下面改成不需要merge的方式，直接在SFT LoRA的基础上继续训练:
 
 # load the base model
@@ -177,16 +179,17 @@ base_model_for_PPO = AutoModelForCausalLM.from_pretrained(
     device_map='auto'
     )
 # install the lora modules
-base_model_for_PPO_with_sft_lora = PeftModel.from_pretrained(
-    base_model_for_PPO, 
-    script_args.sft_model_lora_path
-    )
+#base_model_for_PPO_with_sft_lora = PeftModel.from_pretrained(
+#    base_model_for_PPO,
+#    script_args.sft_model_lora_path
+#    )
 # wrap with the AutoModelForCausalLMWithValueHead wrapper
-ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-    base_model_for_PPO_with_sft_lora
-)
+#ppo_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+#    base_model_for_PPO
+#)
 # make the lora modules trainable
 for name, param in ppo_model.named_parameters():
+    print(name)
     if 'lora' in name:
         param.requires_grad = True
 
@@ -201,10 +204,12 @@ if script_args.adafactor:
         lr=config.learning_rate,
     )
 # We then build the PPOTrainer, passing the model, the reference model, the tokenizer
-ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-    script_args.merged_sft_model_path,
-    trust_remote_code=True
-)
+ref_model = create_reference_model(ppo_model)
+
+#ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+#    script_args.merged_sft_model_path,
+#    trust_remote_code=True
+#)
 ppo_trainer = PPOTrainer(
     config,
     ppo_model, # model with value head
@@ -237,9 +242,6 @@ device = ppo_trainer.accelerator.device
 if ppo_trainer.accelerator.num_processes == 1:
     device = 0 if torch.cuda.is_available() else "cpu"  # to avoid a ` pipeline` bug
 
-
-from modeling_baichuan_for_cls import BaichuanForSequenceClassification
-from peft import PeftModel
 print('Loading base model for reward model...')
 base_model_for_RM = BaichuanForSequenceClassification.from_pretrained(
     script_args.base_model_name, num_labels=1, 
@@ -261,15 +263,16 @@ def get_reward_value(texts):
 # the `generate` function of the trained model.
 generation_kwargs = {
     # "min_length": -1,
-    # "top_k": 0.0,
-    # "top_p": 0.95,
+    "temperature": 0.01,
+    "top_k": 0,
+    "top_p": 1,
     "repetition_penalty": 1.1,
     "do_sample": True,
     "begin_suppress_tokens": [tokenizer.eos_token_id],
     # "remove_invalid_values": True,
     # "pad_token_id": tokenizer.pad_token_id,
     # "eos_token_id": tokenizer.eos_token_id,
-    "max_new_tokens": 512
+    "max_new_tokens": 1024
     # "eos_token_id": 100_000, # why？
 }
 output_min_length = 32
@@ -358,4 +361,3 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         print(epoch)
         print(question_tensors)
         print('---------------------')
-        break

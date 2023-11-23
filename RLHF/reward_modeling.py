@@ -137,9 +137,14 @@ script_args = parser.parse_args_into_dataclasses()[0]
 # load the reward dataset
 # - `beyond/rlhf-reward-single-round`` for English
 # - `beyond/rlhf-reward-single-round-trans_chinese`` for Chinese
-reward_dataset = load_from_disk('/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese')
+'''
+datasets1 = load_dataset("beyond/rlhf-reward-single-round-trans_chinese", cache_dir="./dataset")
+reward_dataset = load_from_disk('/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese/data')
 train_dataset = reward_dataset['train']
 eval_dataset = reward_dataset['test']
+'''
+train_dataset= load_dataset("parquet", data_files="/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese/data/train-00000-of-00001-789dc5dece0f1fc1.parquet",split="train", cache_dir=None)
+eval_dataset= load_dataset("parquet", data_files="/home/work/zhaochenglu/LLM-Tuning/data/rlhf-reward-single-round-trans_chinese/data/test-00000-of-00001-8ecd46436fadcf7f.parquet", split="train",cache_dir=None)
 if script_args.train_subset > 0:
     train_dataset = train_dataset.select(range(script_args.train_subset))
 if script_args.eval_subset > 0:
@@ -231,8 +236,8 @@ def preprocess_function(examples):
         # tokenized_j = tokenizer("Question: " + question + "\n\nAnswer: " + response_j, truncation=True)
         # tokenized_k = tokenizer("Question: " + question + "\n\nAnswer: " + response_k, truncation=True)
         # 中文数据集：
-        tokenized_j = tokenizer("问：" + question + "\n\n答：" + response_j, truncation=True)
-        tokenized_k = tokenizer("问：" + question + "\n\n答：" + response_k, truncation=True)
+        tokenized_j = tokenizer("<reserved_102>" + question + "<reserved_103>" + response_j, truncation=True)
+        tokenized_k = tokenizer("<reserved_102>" + question + "<reserved_103>" + response_k, truncation=True)
         new_examples["input_ids_j"].append(tokenized_j["input_ids"])
         new_examples["attention_mask_j"].append(tokenized_j["attention_mask"])
         new_examples["input_ids_k"].append(tokenized_k["input_ids"])
@@ -314,7 +319,7 @@ class RewardDataCollatorWithPadding:
 
 
 # Define the metric that we'll use for validation.
-accuracy = evaluate.load("accuracy")
+accuracy = evaluate.load("accuracy.py")
 
 
 def compute_metrics(eval_pred):
