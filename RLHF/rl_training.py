@@ -204,12 +204,12 @@ if script_args.adafactor:
         lr=config.learning_rate,
     )
 # We then build the PPOTrainer, passing the model, the reference model, the tokenizer
-ref_model = create_reference_model(ppo_model)
+#ref_model = create_reference_model(ppo_model)
 
-#ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-#    script_args.merged_sft_model_path,
-#    trust_remote_code=True
-#)
+ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+    script_args.merged_sft_model_path,
+    trust_remote_code=True
+)
 ppo_trainer = PPOTrainer(
     config,
     ppo_model, # model with value head
@@ -263,16 +263,15 @@ def get_reward_value(texts):
 # the `generate` function of the trained model.
 generation_kwargs = {
     # "min_length": -1,
-    "temperature": 0.01,
     "top_k": 0,
-    "top_p": 1,
+    "top_p": 0.95,
     "repetition_penalty": 1.1,
     "do_sample": True,
     "begin_suppress_tokens": [tokenizer.eos_token_id],
     # "remove_invalid_values": True,
     # "pad_token_id": tokenizer.pad_token_id,
     # "eos_token_id": tokenizer.eos_token_id,
-    "max_new_tokens": 1024
+    "max_new_tokens": 512
     # "eos_token_id": 100_000, # why？
 }
 output_min_length = 32
@@ -326,27 +325,34 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         其实可以发现，主要是reward model太差了，导致对某些不好的输出类型产生了高reward，然后模型就越学越差然后崩了。所以可能问题关键就在于reward model的质量吧。
         
         """
-        response_tensors = ppo_trainer.generate(
+        response_tensors  = ppo_trainer.generate(
             question_tensors,
             return_prompt=False,
             # length_sampler=output_length_sampler,  # 这个参数，跟 generation_kwargs 中的 max_new_tokens 只用设置一个
             **generation_kwargs,
         )
+        ref_response_tensors = response_tensors
         batch["response"] = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
+        batch["ref_response"] = tokenizer.batch_decode(ref_response_tensors,skip_special_tokens=True)
 
         # Compute sentiment score
         texts = [q + r for q, r in zip(batch["query"], batch["response"])]
+        ref_texts = [q + r for q, r in zip(batch["query"], batch["ref_response"])]
 
         """下面两行是使用pipeline来做，但我这里不采用这种方式
         pipe_outputs = sentiment_pipe(texts, **sent_kwargs)
         rewards = [torch.tensor(output[0]["score"] - script_args.reward_baseline) for output in pipe_outputs]
         """
         scores = get_reward_value(texts)
+        ref_scores = get_reward_value(ref_texts)
         rewards = [torch.tensor(score - script_args.reward_baseline) for score in scores]
-        for q, r, s in zip(batch["query"], batch["response"], scores):
+        for q, r, s, r1,s1 in zip(batch["query"], batch["response"],batch["ref_response"], scores,ref_scores):
             print(epoch,'query:',q)
             print('response:',r)
             print('score:',s)
+            print('ref_response:', r1)
+            print('ref_score:', s1)
+
         
         # Run PPO step
         stats = ppo_trainer.step(question_tensors, response_tensors, rewards)
